@@ -14,6 +14,7 @@
 				<xsd:element name="medium" type="medium"/>
 				<xsd:element name="phase" type="phase"/>
 				<xsd:element name="include" type="include"/>
+				<xsd:element name="path" type="path"/>
 				<xsd:element name="null" type="null"/>
 
 				<!-- Usual attributes -->
@@ -316,6 +317,10 @@
 
 	<xsd:complexType name="include">
 		<xsd:attribute name="filename" type="xsd:string" use="required"/>
+	</xsd:complexType>
+
+	<xsd:complexType name="path">
+		<xsd:attribute name="value" type="xsd:string" use="required"/>
 	</xsd:complexType>
 
 	<xsd:complexType name="alias">
