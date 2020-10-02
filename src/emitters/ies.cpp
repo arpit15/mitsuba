@@ -24,10 +24,18 @@
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/fresolver.h>
 #include <mitsuba/core/fstream.h>
-// #include <mitsuba/render/mipmap.h>
-#include <mitsuba/hw/basicshader.h>
+#include <mitsuba/render/mipmap.h>
+// #include <mitsuba/hw/gpuprogram.h>
+#include <mitsuba/hw/gputexture.h>
+// #include <mitsuba/hw/basicshader.h>
 
 MTS_NAMESPACE_BEGIN
+
+#if SPECTRUM_SAMPLES == 3
+# define IES_PIXELFORMAT Bitmap::ERGB
+#else
+# define IES_PIXELFORMAT Bitmap::ESpectrum
+#endif
 
 /*!\plugin{point}{Point light source}
  * \icon{emitter_point}
@@ -59,8 +67,12 @@ MTS_NAMESPACE_BEGIN
 
 class IESEmitter : public Emitter {
 public:
+    typedef TSpectrum<half, SPECTRUM_SAMPLES> SpectrumHalf;
+    typedef TMIPMap<Spectrum, SpectrumHalf> MIPMap;
     IESEmitter(const Properties &props) : Emitter(props) {
         m_type |= EDeltaPosition;
+
+        // Log(EInfo, props.toString().c_str());
 
         if (props.hasProperty("position")) {
             if (props.hasProperty("toWorld"))
@@ -72,49 +84,67 @@ public:
 
         m_intensity = props.getSpectrum("intensity", Spectrum::getD65());
         
-        // load_ies(props.getString("ies"));
-        // m_texture = props.getSpectrum("texture", Spectrum::getD65());
-        m_texture = new ConstantSpectrumTexture(
-            props.getSpectrum("texture", Spectrum::getD65()));
+        load_ies(props.getString("filename"));
+
         Log(EInfo, "Able to load texture!");
+
     }
 
-    // void load_ies(std::string fname) {
-    //     fs::path m_filename = Thread::getThread()->getFileResolver()->resolve(fname);
+    void load_ies(std::string fname) {
+        fs::path m_filename = Thread::getThread()->getFileResolver()->resolve(fname);
 
-    //     Log(EInfo, "IES \"%s\"", m_filename.filename().string().c_str());
-    //     if (!fs::exists(m_filename))
-    //         Log(EError, "IES map file \"%s\" could not be found!", m_filename.string().c_str());
+        Log(EInfo, "IES \"%s\"", m_filename.filename().string().c_str());
+        if (!fs::exists(m_filename))
+            Log(EError, "IES map file \"%s\" could not be found!", m_filename.string().c_str());
 
-    //     ref<FileStream> fs = new FileStream(m_filename, FileStream::EReadOnly);
-    //     ref<Bitmap> bitmap = new Bitmap(Bitmap::EAuto, fs);
+        ref<FileStream> fs = new FileStream(m_filename, FileStream::EReadOnly);
+        ref<Bitmap> bitmap = new Bitmap(Bitmap::EAuto, fs);
 
-    //     Properties rfilterProps("lanczos");
-    //     rfilterProps.setInteger("lobes", 2);
-    //     ref<ReconstructionFilter> rfilter = static_cast<ReconstructionFilter *> (
-    //         PluginManager::getInstance()->createObject(
-    //         MTS_CLASS(ReconstructionFilter), rfilterProps));
-    //     rfilter->configure();
+        Properties rfilterProps("lanczos");
+        rfilterProps.setInteger("lobes", 2);
+        ref<ReconstructionFilter> rfilter = static_cast<ReconstructionFilter *> (
+            PluginManager::getInstance()->createObject(
+            MTS_CLASS(ReconstructionFilter), rfilterProps));
+        rfilter->configure();
 
 
-    //     m_mipmap = new MIPMap(bitmap, Bitmap::EFloat, Bitmap::EFloat, rfilter,
-    //         ReconstructionFilter::ERepeat, ReconstructionFilter::EClamp, EEWA, 10.0f,
-    //         fs::path(), 0, std::numeric_limits<Float>::infinity(), Spectrum::EIlluminant);
+        m_mipmap = new MIPMap(bitmap, IES_PIXELFORMAT, Bitmap::EFloat, rfilter,
+            ReconstructionFilter::EClamp, ReconstructionFilter::EClamp, EEWA, 10.0f,
+            fs::path(), 0, std::numeric_limits<Float>::infinity(), Spectrum::EIlluminant);
 
-    // }
+
+        // Point2 uv(0.f,0.f);
+        // // if(uv[0]<0.f) uv[0] = 0.5f-uv[0];
+        // Log(EInfo, "evaldir u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalTexel(0,0,0).toString().c_str());
+        
+        // // Log(EInfo, "evaldir u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalBox(0,uv).toString().c_str());
+        
+        // uv[0] = 1.f; uv[1] = 0.f;
+        // Log(EInfo, "evaldir u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalTexel(0,255,0).toString().c_str());
+        
+        // // Log(EInfo, "evaldir u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalBox(0,uv).toString().c_str());
+        
+        // uv[0] = 0.f; uv[1] = 1.0f;
+        // Log(EInfo, "evaldir u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalBox(0,uv).toString().c_str());
+        
+
+        // uv[0] = 1.0f; uv[1] = 1.0f;
+        // Log(EInfo, "evaldir u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalBox(0,uv).toString().c_str());
+        
+    }
 
 
     IESEmitter(Stream *stream, InstanceManager *manager)
      : Emitter(stream, manager) {
         configure();
         m_intensity = Spectrum(stream);
-        m_texture = static_cast<Texture *>(manager->getInstance(stream));
+        std::string fname = stream->readString();
+        load_ies(fname);
     }
 
     void serialize(Stream *stream, InstanceManager *manager) const {
         Emitter::serialize(stream, manager);
-        
-        manager->serialize(stream, m_texture.get());
+        stream->writeString(m_filename.string());
         m_intensity.serialize(stream);
         
     }
@@ -141,7 +171,11 @@ public:
             PositionSamplingRecord &pRec,
             const Point2 &sample,
             const Point2 *extra) const {
-        dRec.d = warp::squareToUniformSphere(sample);
+        const Transform &trafo = m_worldTransform->eval(pRec.time);
+        
+        Vector d = warp::squareToUniformSphere(sample);
+        dRec.d = trafo(d);
+        // dRec.d = warp::squareToUniformSphere(sample);
         dRec.pdf = INV_FOURPI;
         dRec.measure = ESolidAngle;
         return evalDirection(dRec, pRec) / dRec.pdf;
@@ -158,31 +192,28 @@ public:
         const Transform &trafo = m_worldTransform->eval(pRec.time);
         Vector local = trafo.inverse()(dRec.d);
 
-        /* Convert to latitude-longitude texture coordinates */
-        Intersection its;
-        its.hasUVPartials = false;
-        // its.uv =  Point2(
-        //     std::atan2(local.y, local.x) * INV_TWOPI  + 0.5f,
+        // Point2 uv(
+        //     std::atan2(local.x, -local.z) * INV_TWOPI,
+        //     math::safe_acos(local.y) * INV_PI
+        // );
+
+        // Point2 uv(
+        //     std::atan2(local.y, local.x) * INV_TWOPI,
         //     math::safe_acos(local.z) * INV_PI
         // );
 
-        its.uv =  Point2(0.f,0.f);
+        Point2 uv(
+            math::safe_acos(local.z) * INV_PI,
+            std::atan2(local.y, local.x) * INV_TWOPI
+            
+        );
 
-        Spectrum fac = m_texture->eval(its);
-        Log(EInfo, "1evalDirection phi:%f, theta:%f fac:%f", its.uv[0], its.uv[1], fac.getLuminance());
-
-        its.uv =  Point2(1.0f, 0.f);
-
-        fac = m_texture->eval(its);
-        Log(EInfo, "2evalDirection phi:%f, theta:%f fac:%f", its.uv[0], its.uv[1], fac.getLuminance());
-
-        its.uv =  Point2(0.0f,1.0f);
-
-        fac = m_texture->eval(its);
-        Log(EInfo, "3evalDirection phi:%f, theta:%f fac:%f", its.uv[0], its.uv[1], fac.getLuminance());
+        if(uv[0]<0.f) uv[0] = 1.f+uv[0];
 
 
-        return Spectrum((dRec.measure == ESolidAngle) ? INV_FOURPI*m_texture->eval(its) : Spectrum(0.0f));
+        // Log(EInfo, "evaldir u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalBox(0,uv).toString().c_str());
+        return Spectrum((dRec.measure == ESolidAngle) ? INV_FOURPI*m_mipmap->evalBox(0, uv) : Spectrum(0.0f));
+        // return Spectrum((dRec.measure == ESolidAngle) ? INV_FOURPI : (0.0f));
     }
 
     Spectrum sampleRay(Ray &ray,
@@ -195,19 +226,29 @@ public:
         ray.setOrigin(trafo(Point(0.0f)));
         ray.setDirection(trafo(local));
         
-        // Vector local = ray.d;
-        /* Convert to latitude-longitude texture coordinates */
-        Intersection its;
-        its.hasUVPartials = false;
-        its.uv =  Point2(
-            std::atan2(local.x, local.y) * INV_TWOPI,
-            math::safe_acos(local.z) * INV_PI
+        
+        // Point2 uv(
+        //     std::atan2(local.x, -local.z) * INV_TWOPI,
+        //     math::safe_acos(local.y) * INV_PI
+        // );
+        
+        // Point2 uv(
+        //     std::atan2(local.y, local.x) * INV_TWOPI,
+        //     math::safe_acos(local.z) * INV_PI
+        // );
+        
+        Point2 uv(
+            math::safe_acos(local.z) * INV_PI,
+            std::atan2(local.y, local.x) * INV_TWOPI
+            
         );
-
-        Spectrum fac = m_texture->eval(its);
-        Log(EInfo, "sampleRay phi:%f, theta:%f fac:%f", its.uv[0], its.uv[1], fac.getLuminance());
-
-        return m_intensity * (4 * M_PI) * m_texture->eval(its);
+        if(uv[0]<0.f) uv[0] = 1.f+uv[0];
+        
+        // Log(EInfo, "sampleRay u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalBox(0,uv).toString().c_str());
+        
+        return m_intensity * (4*M_PI) * m_mipmap->evalBox(0,uv);
+        // return m_intensity * (4*M_PI);
+        
     }
 
     Spectrum sampleDirect(DirectSamplingRecord &dRec, const Point2 &sample) const {
@@ -226,31 +267,43 @@ public:
         dRec.measure = EDiscrete;
 
         Vector local = trafo.inverse()(-dRec.d);
-        /* Convert to latitude-longitude texture coordinates */
-        Intersection its;
-        its.hasUVPartials = false;
-        its.uv =  Point2(
-            std::atan2(local.y, local.x) * INV_TWOPI,
-            math::safe_acos(local.z) * INV_PI
+     
+        // Point2 uv(
+        //     std::atan2(local.x, -local.z) * INV_TWOPI,
+        //     math::safe_acos(local.y) * INV_PI
+        // );
+
+        // Point2 uv(
+        //     std::atan2(local.y, local.x) * INV_TWOPI,
+        //     math::safe_acos(local.z) * INV_PI
+        // );
+
+        Point2 uv(
+            math::safe_acos(local.z) * INV_PI,
+            std::atan2(local.y, local.x) * INV_TWOPI
+            
         );
 
-        Spectrum fac = m_texture->eval(its);
-        Log(EInfo, "sampleDirect phi:%f, theta:%f fac:%f", its.uv[0], its.uv[1], fac.getLuminance());
+        if(uv[0]<0.f) uv[0] = 1.f+uv[0];
+        
 
-        return m_intensity * (invDist * invDist) * m_texture->eval(its);
+        // Log(EInfo, "sampleDirect u:%f, v:%f, val:%s", uv[0], uv[1], m_mipmap->evalBox(0,uv).toString().c_str());
+        
+        return m_intensity * (invDist * invDist) * m_mipmap->evalBox(0,uv);
+        // return m_intensity * (invDist * invDist);
     }
 
     Float pdfDirect(const DirectSamplingRecord &dRec) const {
         return dRec.measure == EDiscrete ? 1.0f : 0.0f;
     }
 
-    void addChild(const std::string &name, ConfigurableObject *child) {
-        if (child->getClass()->derivesFrom(MTS_CLASS(Texture)) && name == "texture") {
-            m_texture = static_cast<Texture *>(child);
-        } else {
-            Emitter::addChild(name, child);
-        }
-    }
+    // void addChild(const std::string &name, ConfigurableObject *child) {
+    //     if (child->getClass()->derivesFrom(MTS_CLASS(Texture)) && name == "texture") {
+    //         m_texture = static_cast<Texture *>(child);
+    //     } else {
+    //         Emitter::addChild(name, child);
+    //     }
+    // }
 
     AABB getAABB() const {
         return m_worldTransform->getTranslationBounds();
@@ -261,7 +314,7 @@ public:
         oss << "IESEmitter[" << endl
             << "  worldTransform = " << indent(m_worldTransform.toString()) << "," << endl
             << "  intensity = " << m_intensity.toString() << "," << endl
-            << "  texture = " << m_texture.toString() << "," << std::endl
+            // << "  texture = " << m_texture.toString() << "," << std::endl
             << "  medium = " << indent(m_medium.toString())
             << "]";
         return oss.str();
@@ -272,8 +325,10 @@ public:
     MTS_DECLARE_CLASS()
 private:
     Spectrum m_intensity;
-    // MIPMap *m_mipmap;
-    ref<const Texture> m_texture;
+    MIPMap *m_mipmap;
+    fs::path m_filename;
+    
+    // ref<const Texture> m_texture;
 };
 
 
@@ -282,16 +337,14 @@ private:
 class IESEmitterShader : public Shader {
 public:
     IESEmitterShader(Renderer *renderer, const Spectrum &intensity,
-        const Texture *texture)
-        : Shader(renderer, EEmitterShader), m_intensity(intensity), m_texture(texture) {
-
-        m_textureShader = renderer->registerShaderForResource(m_texture.get());
+        const fs::path &filename)
+        : Shader(renderer, EEmitterShader), m_intensity(intensity), m_filename(filename) {
     }
 
     void resolve(const GPUProgram *program, const std::string &evalName,
             std::vector<int> &parameterIDs) const {
         parameterIDs.push_back(program->getParameterID(evalName + "_intensity", false));
-        // parameterIDs.push_back(program->getParameterID(evalName + "_mipmap", false));
+        parameterIDs.push_back(program->getParameterID(evalName + "_mipmap", false));
     }
 
     void generateCode(std::ostringstream &oss, const std::string &evalName,
@@ -315,13 +368,12 @@ public:
     MTS_DECLARE_CLASS()
 private:
     Spectrum m_intensity;
-    // MIPMap *m_mipmap;
-    ref<const Texture> m_texture;
-    ref<Shader> m_textureShader;
+    MIPMap *m_mipmap;
+    fs::path m_filename;
 };
 
 Shader *IESEmitter::createShader(Renderer *renderer) const {
-    return new IESEmitterShader(renderer, m_intensity, m_texture.get());
+    return new IESEmitterShader(renderer, m_intensity, m_filename);
 }
 
 MTS_IMPLEMENT_CLASS(IESEmitterShader, false, Shader)
