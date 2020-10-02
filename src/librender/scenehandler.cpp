@@ -103,6 +103,7 @@ SceneHandler::SceneHandler(const ParameterMap &params,
     m_tags["animation"]  = TagEntry(EAnimation,  (Class *) NULL);
     m_tags["include"]    = TagEntry(EInclude,    (Class *) NULL);
     m_tags["alias"]      = TagEntry(EAlias,      (Class *) NULL);
+    m_tags["path"]      = TagEntry(EResources,      (Class *) NULL);
     m_tags["default"]    = TagEntry(EDefault,    (Class *) NULL);
 
     XMLTransService::Codes failReason;
@@ -652,6 +653,43 @@ void SceneHandler::endElement(const XMLCh* const xmlName) {
                     XMLLog(EError, "Duplicate ID '%s' used in scene description!", id.c_str());
                 obj->incRef();
                 (*m_namedObjects)[as] = obj;
+            }
+            break;
+
+        case EResources: {
+                SAXParser* parser = new SAXParser();
+                FileResolver *resolver = Thread::getThread()->getFileResolver();
+                fs::path schemaPath = resolver->resolveAbsolute("data/schema/scene.xsd");
+
+                /* Check against the 'scene.xsd' XML Schema */
+                parser->setDoSchema(true);
+                parser->setValidationSchemaFullChecking(true);
+                parser->setValidationScheme(SAXParser::Val_Always);
+                parser->setExternalNoNamespaceSchemaLocation(schemaPath.c_str());
+
+                /* Set the handler and start parsing */
+                SceneHandler *handler = new SceneHandler(m_params, m_namedObjects, true);
+                parser->setDoNamespaces(true);
+                parser->setDocumentHandler(handler);
+                parser->setErrorHandler(handler);
+
+                // TODO: Add check for depth level
+                fs::path resource_path(context.attributes["value"]);
+                if(!resource_path.is_absolute()) {
+                    // Can't find the original filename First resolve in XML file directory
+                    // resource_path = fs::path().parent_path() / resource_path;
+                    // if(!fs::exists(resource_path))
+                        resource_path = resolver->resolve(context.attributes["value"]); 
+                }
+                if(!fs::exists(resource_path))
+                    XMLLog(EError, "folder %s not found", context.attributes["value"]);
+                // fs::path path = resolver->resolve(context.attributes["value"]);
+                XMLLog(EInfo, "Parsing included file \"%s\" ..", resource_path.filename().string().c_str());
+                resolver->prependPath(resource_path);
+
+                object = handler->getScene();
+                delete parser;
+                delete handler;
             }
             break;
 
